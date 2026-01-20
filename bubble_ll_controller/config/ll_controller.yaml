@@ -4,3 +4,11 @@ neutral_us: 1500.0
 max_pwm_us: 1900.0
 min_pwm_us: 1100.0
 update_rate_hz: 10.0
+
+enable_pitch_control: false
+
+
+twist_vel_xy: 0.4
+twist_vel_z: 0.3
+twist_yaw_rate: 0.6
+twist_pitch_rate: 0.6

@@ -12,11 +12,12 @@ from rclpy.time import Time
 from control_msgs.msg import SingleDOFStateStamped
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import Joy
+from geometry_msgs.msg import Twist
 
 import bluerobotics_navigator as navigator
 from bluerobotics_navigator import Raspberry, NavigatorVersion
 
-from utils import clamp_float, us_to_value, axes_to_pwm_raw, vertical_mix_pwm_us
+from utils import clamp_float, us_to_value, axes_to_pwm_raw, vertical_mix_pwm_us, clamp, normalize_xy, trigger_to_01
 
 navigator.set_raspberry_pi_version(Raspberry.Pi5)
 navigator.set_navigator_version(NavigatorVersion.Version2)
@@ -31,6 +32,7 @@ def _load_yaml(path: str) -> dict:
 class ControlMode(str, Enum):
     GAMEPAD = "gamepad"
     AUV_CONTROLLER = "auv_controller"
+    GAMEPAD_TWIST = "gamepad_twist"
 
 
 class Ll_controller(Node):
@@ -56,6 +58,13 @@ class Ll_controller(Node):
         self.UPDATE_RATE_HZ = float(config.get("update_rate_hz", 50.0))
         self.TOPIC_TIMEOUT_S = 0.3
 
+        self.TWIST_VEL_XY = float(config.get("twist_vel_xy", 0.4))      
+        self.TWIST_VEL_Z = float(config.get("twist_vel_z", 0.3))        
+        self.TWIST_YAW_RATE = float(config.get("twist_yaw_rate", 0.6))  
+        self.TWIST_PITCH_RATE = float(config.get("twist_pitch_rate", 0.6))
+
+        self.ENABLE_PITCH_CONTROL = bool(config.get("enable_pitch_control", False))
+
         self.channels = [0, 1, 2, 3, 4, 5, 6, 7]
 
         self.topics: List[str] = [
@@ -71,8 +80,10 @@ class Ll_controller(Node):
 
         self.declare_parameter("joy_button_a", 0)
         self.declare_parameter("joy_button_b", 1)
+        self.declare_parameter("joy_button_x", 2)
         self._btn_a: int = int(self.get_parameter("joy_button_a").value)
         self._btn_b: int = int(self.get_parameter("joy_button_b").value)
+        self._btn_x: int = int(self.get_parameter("joy_button_x").value)
 
         self._mode: ControlMode = ControlMode.GAMEPAD
 
@@ -81,6 +92,12 @@ class Ll_controller(Node):
         self.pub_pwm_us = self.create_publisher(
             Float64MultiArray,
             "/thrusters/pwm_us",
+            10,
+        )
+
+        self.pub_twist_ref = self.create_publisher(
+            Twist,
+            "/adaptive_integral_terminal_sliding_mode_controller/reference",
             10,
         )
 
@@ -114,7 +131,11 @@ class Ll_controller(Node):
         self.timer = self.create_timer(1.0 / self.UPDATE_RATE_HZ, self._on_timer)
 
         self.get_logger().info(
-            f"Started. mode={self._mode.value} PWM_FREQ_HZ={self.PWM_FREQ_HZ}, update={self.UPDATE_RATE_HZ}Hz, joy A={self._btn_a}, B={self._btn_b}, Span={self.GAMEPAD_SPAN}"
+            "Started. "
+            f"mode={self._mode.value} PWM_FREQ_HZ={self.PWM_FREQ_HZ}, update={self.UPDATE_RATE_HZ}Hz, "
+            f"joy A={self._btn_a}, B={self._btn_b}, X={self._btn_x}, Span={self.GAMEPAD_SPAN}, "
+            f"TwistXY={self.TWIST_VEL_XY} m/s TwistZ={self.TWIST_VEL_Z} m/s "
+            f"YawRate={self.TWIST_YAW_RATE} rad/s PitchRate={self.TWIST_PITCH_RATE} rad/s"
         )
 
     def _set_mode(self, mode: ControlMode) -> None:
@@ -123,7 +144,7 @@ class Ll_controller(Node):
 
         self._mode = mode
 
-        if self._mode == ControlMode.GAMEPAD:
+        if self._mode in (ControlMode.GAMEPAD, ControlMode.GAMEPAD_TWIST):
             self._send_neutral_all()
 
         self.get_logger().info(f"Switched mode -> {self._mode.value}")
@@ -141,6 +162,9 @@ class Ll_controller(Node):
     def _cb_joy(self, msg: Joy) -> None:
         # mode switching on A/B
         buttons = list(msg.buttons) if msg.buttons is not None else []
+        axes = list(msg.axes) if msg.axes is not None else []
+        axes_4 = axes[4] if self.ENABLE_PITCH_CONTROL else 0.0
+
         if self._prev_joy_buttons is None:
             self._prev_joy_buttons = buttons
             return
@@ -158,12 +182,15 @@ class Ll_controller(Node):
         if rising_edge(self._btn_b):
             self._set_mode(ControlMode.AUV_CONTROLLER)
 
+        if rising_edge(self._btn_x):
+            self._set_mode(ControlMode.GAMEPAD_TWIST)
+
         self._prev_joy_buttons = buttons
 
         if self._mode == ControlMode.GAMEPAD:
-            axes=list(msg.axes)
             t1 = axes_to_pwm_raw(axes[0], axes[1], axes[3], span = self.GAMEPAD_SPAN) # XY yaw
-            t2 = vertical_mix_pwm_us(axes[5], axes[2], axes[4], span = self.GAMEPAD_SPAN) # vertical thrusters
+
+            t2 = vertical_mix_pwm_us(axes[5], axes[2], axes_4, span = self.GAMEPAD_SPAN) # vertical thrusters
 
             t = t1 + t2
 
@@ -173,6 +200,33 @@ class Ll_controller(Node):
             msg = Float64MultiArray()
             msg.data = t
             self.pub_pwm_us.publish(msg)
+
+        elif self._mode == ControlMode.GAMEPAD_TWIST:
+            if len(axes) < 6:
+                return
+            x_cmd = clamp(-axes[0], -1.0, 1.0)  # right (+)
+            y_cmd = clamp( axes[1], -1.0, 1.0)  # forward (+)
+            yaw_cmd = clamp(-axes[3], -1.0, 1.0)  # yaw right (+)
+
+            x_cmd, y_cmd = normalize_xy(x_cmd, y_cmd)
+
+            t_up = trigger_to_01(axes[5])   
+            t_down = trigger_to_01(axes[2])
+            u_z_up = clamp(t_up - t_down, -1.0, 1.0)
+
+            # Pitch command
+            u_pitch = clamp(axes_4, -1.0, 1.0)
+
+            tw = Twist()
+            tw.linear.x = float(y_cmd * self.TWIST_VEL_XY)     # forward
+            tw.linear.y = float(x_cmd * self.TWIST_VEL_XY)     # right
+            tw.linear.z = float((-u_z_up) * self.TWIST_VEL_Z)  # down positive
+
+            tw.angular.x = 0.0
+            tw.angular.y = float(u_pitch * self.TWIST_PITCH_RATE)
+            tw.angular.z = float(yaw_cmd * self.TWIST_YAW_RATE)
+
+            self.pub_twist_ref.publish(tw)
 
     def _send_neutral_all(self) -> None:
         navigator.set_pwm_channels_values(self.channels, [self.NEUTRAL_RAW] * 8)
