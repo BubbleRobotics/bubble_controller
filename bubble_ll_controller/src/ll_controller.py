@@ -64,6 +64,8 @@ class Ll_controller(Node):
         self.TWIST_PITCH_RATE = float(config.get("twist_pitch_rate", 0.6))
 
         self.ENABLE_PITCH_CONTROL = bool(config.get("enable_pitch_control", False))
+        
+        self.isArmed = False
 
         self.channels = [0, 1, 2, 3, 4, 5, 6, 7]
 
@@ -81,9 +83,11 @@ class Ll_controller(Node):
         self.declare_parameter("joy_button_a", 0)
         self.declare_parameter("joy_button_b", 1)
         self.declare_parameter("joy_button_x", 2)
+        self.declare_parameter("joy_button_power", 8)
         self._btn_a: int = int(self.get_parameter("joy_button_a").value)
         self._btn_b: int = int(self.get_parameter("joy_button_b").value)
         self._btn_x: int = int(self.get_parameter("joy_button_x").value)
+        self._btn_power: int = int(self.get_parameter("joy_button_power").value)
 
         self._mode: ControlMode = ControlMode.GAMEPAD
 
@@ -108,11 +112,11 @@ class Ll_controller(Node):
 
         navigator.init()
         navigator.set_pwm_freq_hz(self.PWM_FREQ_HZ)
-        navigator.set_pwm_enable(True)
+        # navigator.set_pwm_enable(True)
 
-        # Neutral for ESC arming
-        self._send_neutral_all()
-        time.sleep(2.0)
+        # # Neutral for ESC arming
+        # self._send_neutral_all()
+        # time.sleep(2.0)
 
         # AUV controller subscribers
         self.sub1 = self.create_subscription(SingleDOFStateStamped, self.topics[0], lambda m: self._cb_thruster(0, m), 10)
@@ -137,6 +141,22 @@ class Ll_controller(Node):
             f"TwistXY={self.TWIST_VEL_XY} m/s TwistZ={self.TWIST_VEL_Z} m/s "
             f"YawRate={self.TWIST_YAW_RATE} rad/s PitchRate={self.TWIST_PITCH_RATE} rad/s"
         )
+
+    def _set_arm(self, flag) -> None:
+        # se non e' armato e la flag e' true, allora arma
+        # se e' armato e la flag e' false, allora disarma
+        if flag and not self.isArmed:
+            navigator.set_pwm_enable(True)
+            self.isArmed = True
+            self._send_neutral_all()
+            time.sleep(2.0)
+            self.get_logger().info("Armed thrusters")
+        elif not flag and self.isArmed:
+            self._send_neutral_all()
+            navigator.set_pwm_enable(False)
+            self.isArmed = False
+            self.get_logger().info("Disarmed thrusters")
+            time.sleep(2.0)
 
     def _set_mode(self, mode: ControlMode) -> None:
         if mode == self._mode:
@@ -184,6 +204,9 @@ class Ll_controller(Node):
 
         if rising_edge(self._btn_x):
             self._set_mode(ControlMode.GAMEPAD_TWIST)
+            
+        if rising_edge(self._btn_power):
+            self._set_arm(not self.isArmed)
 
         self._prev_joy_buttons = buttons
 
