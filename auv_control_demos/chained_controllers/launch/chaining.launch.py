@@ -137,6 +137,14 @@ def generate_launch_description():
                 ("/controller_manager/robot_description", "/robot_description"),
             ],
         ),
+        Node(
+            package="topic_tools",
+            executable="relay",
+            arguments=[
+                "/odometry/filtered",
+                "/adaptive_integral_terminal_sliding_mode_controller/system_state",
+            ],
+        ),
         *delay_thruster_spawners,
         delay_tam_controller_spawner_after_thruster_controller_spawners,
         delay_velocity_controller_spawner_after_tam_controller_spawner,
