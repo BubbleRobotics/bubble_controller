@@ -1,0 +1,6 @@
+gamepad_span: 200.0
+pwm_freq_hz: 50.0
+neutral_us: 1500.0
+max_pwm_us: 1900.0
+min_pwm_us: 1100.0
+update_rate_hz: 10.0
