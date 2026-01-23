@@ -10,7 +10,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 
 from control_msgs.msg import SingleDOFStateStamped
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, Float64
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
 
@@ -33,6 +33,7 @@ class ControlMode(str, Enum):
     GAMEPAD = "gamepad"
     AUV_CONTROLLER = "auv_controller"
     GAMEPAD_TWIST = "gamepad_twist"
+    SAFETY = "safety"
 
 
 class Ll_controller(Node):
@@ -59,12 +60,15 @@ class Ll_controller(Node):
         self.TOPIC_TIMEOUT_S = 0.3
 
         self.TWIST_VEL_XY = float(config.get("twist_vel_xy", 0.4))      
-        self.TWIST_VEL_Z = float(config.get("twist_vel_z", 0.3))        
+        self.TWIST_VEL_Z = float(config.get("twist_vel_z", 0.4))        
         self.TWIST_YAW_RATE = float(config.get("twist_yaw_rate", 0.6))  
         self.TWIST_PITCH_RATE = float(config.get("twist_pitch_rate", 0.6))
 
-        self.ENABLE_PITCH_CONTROL = bool(config.get("enable_pitch_control", False))
-        
+        self.enable_pitch = bool(config.get("enable_pitch_control", False))
+
+        self.distance_topic = str(config.get("distance_topic", "/distance"))
+        self.min_distance = float(config.get("min_distance_before_safety", 0.5))
+
         self.isArmed = False
 
         self.channels = [0, 1, 2, 3, 4, 5, 6, 7]
@@ -82,16 +86,22 @@ class Ll_controller(Node):
 
         self.declare_parameter("joy_button_a", 0)
         self.declare_parameter("joy_button_b", 1)
-        self.declare_parameter("joy_button_x", 2)
+        self.declare_parameter("joy_button_x", 3)
         self.declare_parameter("joy_button_power", 8)
+        self.declare_parameter("joy_button_setting", 7)
+        self.declare_parameter("joy_dpad_up_down", 1)
+
         self._btn_a: int = int(self.get_parameter("joy_button_a").value)
         self._btn_b: int = int(self.get_parameter("joy_button_b").value)
         self._btn_x: int = int(self.get_parameter("joy_button_x").value)
         self._btn_power: int = int(self.get_parameter("joy_button_power").value)
+        self._btn_setting: int = int(self.get_parameter("joy_button_setting").value)
+        self._dpad_up_down: int = int(self.get_parameter("joy_dpad_up_down").value)
 
         self._mode: ControlMode = ControlMode.GAMEPAD
 
         self._prev_joy_buttons: Optional[List[int]] = None
+        self._prev_joy_dpad: Optional[List[int]] = None
 
         self.pub_pwm_us = self.create_publisher(
             Float64MultiArray,
@@ -131,8 +141,12 @@ class Ll_controller(Node):
         # Gamepad subscriber
         self.subjoy = self.create_subscription(Joy, "/joy", self._cb_joy, 10)
 
+        self.subdistance = self.create_subscription(Float64, self.distance_topic, self._cb_distance, 10)
+
         # Timer to push PWM at fixed rate
         self.timer = self.create_timer(1.0 / self.UPDATE_RATE_HZ, self._on_timer)
+
+        self._set_arm(True)
 
         self.get_logger().info(
             "Started. "
@@ -169,6 +183,30 @@ class Ll_controller(Node):
 
         self.get_logger().info(f"Switched mode -> {self._mode.value}")
 
+    def _set_enable_pitch(self, flag: bool) -> None:
+        self.enable_pitch = flag
+        self.get_logger().info(f"Pitch control enabled: {self.enable_pitch}")
+    
+    def _set_linear_vel(self, val:int) -> None:
+        delta = 0.1
+        if val > 0:
+            self.TWIST_VEL_XY += delta
+            self.TWIST_VEL_Z += delta
+        elif val < 0:
+            self.TWIST_VEL_XY = max(0.1, self.TWIST_VEL_XY - delta)
+            self.TWIST_VEL_Z = max(0.1, self.TWIST_VEL_Z - delta)
+        self.get_logger().info(f"Linear velocities updated: TWIST_VEL_XY={self.TWIST_VEL_XY} m/s, TWIST_VEL_Z={self.TWIST_VEL_Z} m/s")
+
+    def _set_angular_vel(self, val:int) -> None:
+        delta = 0.1
+        if val > 0:
+            self.TWIST_YAW_RATE += delta
+            self.TWIST_PITCH_RATE += delta
+        elif val < 0:
+            self.TWIST_YAW_RATE = max(0.1, self.TWIST_YAW_RATE - delta)
+            self.TWIST_PITCH_RATE = max(0.1, self.TWIST_PITCH_RATE - delta)
+        self.get_logger().info(f"Angular velocities updated: TWIST_YAW_RATE={self.TWIST_YAW_RATE} rad/s, TWIST_PITCH_RATE={self.TWIST_PITCH_RATE} rad/s")
+
     def _cb_thruster(self, idx: int, msg: SingleDOFStateStamped) -> None:
         if idx in (0, 1, 4, 7):  # invert ccw thrusters
             value = float(msg.dof_state.output)
@@ -183,10 +221,12 @@ class Ll_controller(Node):
         # mode switching on A/B
         buttons = list(msg.buttons) if msg.buttons is not None else []
         axes = list(msg.axes) if msg.axes is not None else []
-        axes_4 = axes[4] if self.ENABLE_PITCH_CONTROL else 0.0
+        axes_4 = axes[4] if self.enable_pitch else 0.0
+        dpad = (axes[6], axes[7])
 
         if self._prev_joy_buttons is None:
             self._prev_joy_buttons = buttons
+            self._prev_joy_dpad = dpad
             return
 
         def rising_edge(btn_idx: int) -> bool:
@@ -208,7 +248,27 @@ class Ll_controller(Node):
         if rising_edge(self._btn_power):
             self._set_arm(not self.isArmed)
 
+        if rising_edge(self._btn_setting):
+            self._set_enable_pitch(not self.enable_pitch)
+        
+        prev_dx, prev_dy = self._prev_joy_dpad
+        dx, dy = dpad  # dx: left/right, dy: up/down
+
+        def dpad_rising(prev: float, cur: float, direction: int) -> bool:
+            """True only on transition from 0 -> +/-1 for the given direction."""
+            return (prev == 0.0) and (cur == float(direction))
+        if dpad_rising(prev_dy, dy, +1):   # up pressed
+            self._set_linear_vel(+1)
+        elif dpad_rising(prev_dy, dy, -1): # down pressed
+            self._set_linear_vel(-1)
+
+        if dpad_rising(prev_dx, dx, +1):   # left pressed
+            self._set_angular_vel(+1)
+        elif dpad_rising(prev_dx, dx, -1): # right pressed
+            self._set_angular_vel(-1)
+
         self._prev_joy_buttons = buttons
+        self._prev_joy_dpad = dpad
 
         if self._mode == ControlMode.GAMEPAD:
             t1 = axes_to_pwm_raw(axes[0], axes[1], axes[3], span = self.GAMEPAD_SPAN) # XY yaw
@@ -250,6 +310,40 @@ class Ll_controller(Node):
             tw.angular.z = float(yaw_cmd * self.TWIST_YAW_RATE)
 
             self.pub_twist_ref.publish(tw)
+
+    def _cb_distance(self, msg: Float64) -> None:
+        distance = msg.data
+        if distance < self.min_distance:
+            if self._mode != ControlMode.SAFETY:
+                self._set_mode(ControlMode.SAFETY)
+                self.get_logger().warn(f"distance {distance:.2f} m below minimum {self.min_distance:.2f} m! Switching to SAFETY mode.")
+                self._send_backward()
+
+
+    def _send_backward(
+        self,
+        backward_us: float = 1300.0,
+        duration_s: float = 0.5,
+    ):
+        horizontal = [0, 1, 2, 3]
+        vertical = [4, 5, 6, 7]
+
+        # Convert us -> raw
+        backward_raw = us_to_value(backward_us, self.PWM_FREQ_HZ)
+        neutral_raw = us_to_value(self.NEUTRAL_US, self.PWM_FREQ_HZ)
+
+        channels = horizontal + vertical
+        values = (
+            [backward_raw] * len(horizontal) +
+            [neutral_raw] * len(vertical)
+        )
+
+        navigator.set_pwm_channels_values(channels, values)
+
+        time.sleep(duration_s)
+
+        self._send_neutral_all()
+        self._set_arm(False)
 
     def _send_neutral_all(self) -> None:
         navigator.set_pwm_channels_values(self.channels, [self.NEUTRAL_RAW] * 8)

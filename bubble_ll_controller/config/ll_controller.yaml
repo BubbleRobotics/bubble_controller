@@ -5,10 +5,13 @@ max_pwm_us: 1900.0
 min_pwm_us: 1100.0
 update_rate_hz: 10.0
 
-enable_pitch_control: false
+enable_pitch_control: true
 
 
 twist_vel_xy: 0.4
-twist_vel_z: 0.3
+twist_vel_z: 0.4
 twist_yaw_rate: 0.6
 twist_pitch_rate: 0.6
+
+distance_topic: /distance
+min_distance_before_safety: 0.5
