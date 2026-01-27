@@ -10,9 +10,10 @@ from rclpy.node import Node
 from rclpy.time import Time
 
 from control_msgs.msg import SingleDOFStateStamped
-from std_msgs.msg import Float64MultiArray, Float64
+from std_msgs.msg import Float64MultiArray, Float32
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 import bluerobotics_navigator as navigator
 from bluerobotics_navigator import Raspberry, NavigatorVersion
@@ -68,6 +69,8 @@ class Ll_controller(Node):
 
         self.distance_topic = str(config.get("distance_topic", "/distance"))
         self.min_distance = float(config.get("min_distance_before_safety", 0.5))
+
+        self.get_logger().info(f"Distance topic: {self.distance_topic}, min distance before safety: {self.min_distance} m")
 
         self.isArmed = False
 
@@ -141,12 +144,19 @@ class Ll_controller(Node):
         # Gamepad subscriber
         self.subjoy = self.create_subscription(Joy, "/joy", self._cb_joy, 10)
 
-        self.subdistance = self.create_subscription(Float64, self.distance_topic, self._cb_distance, 10)
+        # Distance subscriber
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        self.subdistance = self.create_subscription(Float32, self.distance_topic, self._cb_distance, qos)
 
         # Timer to push PWM at fixed rate
         self.timer = self.create_timer(1.0 / self.UPDATE_RATE_HZ, self._on_timer)
 
-        self._set_arm(True)
+        self._set_arm(False)
 
         self.get_logger().info(
             "Started. "
@@ -311,8 +321,10 @@ class Ll_controller(Node):
 
             self.pub_twist_ref.publish(tw)
 
-    def _cb_distance(self, msg: Float64) -> None:
+    def _cb_distance(self, msg: Float32) -> None:
         distance = msg.data
+        self.get_logger().debug(f"Distance received: {distance:.2f} m")
+        self.get_logger().debug(f"Minimum distance threshold: {self.min_distance:.2f} m")
         if distance < self.min_distance:
             if self._mode != ControlMode.SAFETY:
                 self._set_mode(ControlMode.SAFETY)
