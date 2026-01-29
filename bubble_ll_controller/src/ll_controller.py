@@ -10,10 +10,10 @@ from rclpy.node import Node
 from rclpy.time import Time
 
 from control_msgs.msg import SingleDOFStateStamped
-from std_msgs.msg import Float64MultiArray, Float32
+from std_msgs.msg import Float64MultiArray, Float32, String, Float64
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 
 import bluerobotics_navigator as navigator
 from bluerobotics_navigator import Raspberry, NavigatorVersion
@@ -41,11 +41,35 @@ class Ll_controller(Node):
     def __init__(self) -> None:
         super().__init__("ll_controller")
 
+
+        # Parameters: battery monitor
+
+        self.declare_parameter("battery_rate_hz", 10.0)
+        self.declare_parameter("voltage_divider", 11.0)
+
+        # Voltage thresholds (4S Li-ion)
+        self.declare_parameter("warn_v", 14.0)
+        self.declare_parameter("critical_v", 13.6)
+
+        battery_rate_hz = float(self.get_parameter("battery_rate_hz").value)
+        self._v_div = float(self.get_parameter("voltage_divider").value)
+        self._warn_v = float(self.get_parameter("warn_v").value)
+        self._critical_v = float(self.get_parameter("critical_v").value)
+
+        # ADC channel used to read battery voltage
+        self._adc_voltage = navigator.AdcChannel.Ch3
+
+
+        # Parameters: config file
+
         self.declare_parameter("config_path")
         self.CONFIG_PATH = str(self.get_parameter("config_path").value)
 
         self.get_logger().info(f"config file {self.CONFIG_PATH}")
         config = _load_yaml(self.CONFIG_PATH)
+
+
+        # Config: joystick + PWM setup
 
         self.GAMEPAD_SPAN = float(config.get("gamepad_span", 100.0))
 
@@ -55,25 +79,48 @@ class Ll_controller(Node):
         self.MIN_US = float(config.get("min_pwm_us", 1100.0))
         self.MAX_US = float(config.get("max_pwm_us", 1900.0))
 
+        # Precomputed neutral raw value for the PWM driver
         self.NEUTRAL_RAW = us_to_value(self.NEUTRAL_US, self.PWM_FREQ_HZ)
 
         self.UPDATE_RATE_HZ = float(config.get("update_rate_hz", 50.0))
-        self.TOPIC_TIMEOUT_S = 0.3
+        self.TOPIC_TIMEOUT_S = 1
 
-        self.TWIST_VEL_XY = float(config.get("twist_vel_xy", 0.4))      
-        self.TWIST_VEL_Z = float(config.get("twist_vel_z", 0.4))        
-        self.TWIST_YAW_RATE = float(config.get("twist_yaw_rate", 0.6))  
+
+        # Config: twist references
+
+        self.TWIST_VEL_XY = float(config.get("twist_vel_xy", 0.4))
+        self.TWIST_VEL_Z = float(config.get("twist_vel_z", 0.4))
+        self.TWIST_YAW_RATE = float(config.get("twist_yaw_rate", 0.6))
         self.TWIST_PITCH_RATE = float(config.get("twist_pitch_rate", 0.6))
 
         self.enable_pitch = bool(config.get("enable_pitch_control", False))
 
+
+        # Config: distance safety
+
         self.distance_topic = str(config.get("distance_topic", "/distance"))
         self.min_distance = float(config.get("min_distance_before_safety", 0.5))
 
-        self.get_logger().info(f"Distance topic: {self.distance_topic}, min distance before safety: {self.min_distance} m")
+
+        # Config: EMA smoothing
+
+        self.EMA_ENABLE = bool(config.get("ema_enable", True))
+        self.EMA_ALPHA = float(config.get("ema_alpha", 0.2))
+        self._ema_us: Dict[int, float] = {i: self.NEUTRAL_US for i in range(8)}
+
+
+        # Parameters: mode publishing
+
+        self.declare_parameter("mode_topic", "/controller_state")
+        self.declare_parameter("mode_pub_period_s", 0.5)
+
+        self._mode_topic = str(self.get_parameter("mode_topic").value)
+        self._mode_pub_period_s = float(self.get_parameter("mode_pub_period_s").value)
+
+
+        # State / channels / topics
 
         self.isArmed = False
-
         self.channels = [0, 1, 2, 3, 4, 5, 6, 7]
 
         self.topics: List[str] = [
@@ -87,30 +134,36 @@ class Ll_controller(Node):
             "/thruster_8_controller/status",
         ]
 
+
+        # Parameters: joystick mapping
+
         self.declare_parameter("joy_button_a", 0)
         self.declare_parameter("joy_button_b", 1)
         self.declare_parameter("joy_button_x", 3)
         self.declare_parameter("joy_button_power", 8)
         self.declare_parameter("joy_button_setting", 7)
+        self.declare_parameter("joy_button_option", 6)
         self.declare_parameter("joy_dpad_up_down", 1)
 
-        self._btn_a: int = int(self.get_parameter("joy_button_a").value)
-        self._btn_b: int = int(self.get_parameter("joy_button_b").value)
-        self._btn_x: int = int(self.get_parameter("joy_button_x").value)
-        self._btn_power: int = int(self.get_parameter("joy_button_power").value)
-        self._btn_setting: int = int(self.get_parameter("joy_button_setting").value)
-        self._dpad_up_down: int = int(self.get_parameter("joy_dpad_up_down").value)
+        self._btn_a = int(self.get_parameter("joy_button_a").value)
+        self._btn_b = int(self.get_parameter("joy_button_b").value)
+        self._btn_x = int(self.get_parameter("joy_button_x").value)
+        self._btn_power = int(self.get_parameter("joy_button_power").value)
+        self._btn_setting = int(self.get_parameter("joy_button_setting").value)
+        self._btn_option = int(self.get_parameter("joy_button_option").value)
+        self._dpad_up_down = int(self.get_parameter("joy_dpad_up_down").value)
 
+        # Initial control mode
         self._mode: ControlMode = ControlMode.GAMEPAD
 
+        # Cached previous joy state (used for edge detection)
         self._prev_joy_buttons: Optional[List[int]] = None
         self._prev_joy_dpad: Optional[List[int]] = None
 
-        self.pub_pwm_us = self.create_publisher(
-            Float64MultiArray,
-            "/thrusters/pwm_us",
-            10,
-        )
+
+        # Publishers
+
+        self.pub_pwm_us = self.create_publisher(Float64MultiArray, "/thrusters/pwm_us", 10)
 
         self.pub_twist_ref = self.create_publisher(
             Twist,
@@ -118,20 +171,34 @@ class Ll_controller(Node):
             10,
         )
 
+        # Store last received outputs and timestamps (used in AUV_CONTROLLER mode)
         now = self.get_clock().now()
-        # store last received output (float), and time (used in AUV_CONTROLLER mode)
         self.last_out: Dict[int, float] = {i: 0.0 for i in range(8)}
         self.last_time: Dict[int, Time] = {i: now for i in range(8)}
+
+
+        # Navigator hardware init
 
         navigator.init()
         navigator.set_pwm_freq_hz(self.PWM_FREQ_HZ)
         # navigator.set_pwm_enable(True)
 
-        # # Neutral for ESC arming
-        # self._send_neutral_all()
-        # time.sleep(2.0)
 
-        # AUV controller subscribers
+        # Battery publishers + timer
+
+        self._pub_voltage = self.create_publisher(Float64, "/battery/voltage", qos_profile_sensor_data)
+        self._pub_status = self.create_publisher(String, "/battery/status", qos_profile_sensor_data)
+
+        self.battery_timer = 1.0 / max(battery_rate_hz, 0.1)
+        self.create_timer(self.battery_timer, self._on_battery_timer)
+
+        self.get_logger().info(
+            f"Publishing /battery/voltage and /battery/status at {battery_rate_hz:.1f} Hz"
+        )
+
+
+        # Subscribers: AUV controller
+
         self.sub1 = self.create_subscription(SingleDOFStateStamped, self.topics[0], lambda m: self._cb_thruster(0, m), 10)
         self.sub2 = self.create_subscription(SingleDOFStateStamped, self.topics[1], lambda m: self._cb_thruster(1, m), 10)
         self.sub3 = self.create_subscription(SingleDOFStateStamped, self.topics[2], lambda m: self._cb_thruster(2, m), 10)
@@ -144,19 +211,31 @@ class Ll_controller(Node):
         # Gamepad subscriber
         self.subjoy = self.create_subscription(Joy, "/joy", self._cb_joy, 10)
 
-        # Distance subscriber
+        # Distance subscriber (best-effort, low-latency)
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=1,
         )
         self.subdistance = self.create_subscription(Float32, self.distance_topic, self._cb_distance, qos)
+
+
+        # Timers: control loop + mode publish
 
         # Timer to push PWM at fixed rate
         self.timer = self.create_timer(1.0 / self.UPDATE_RATE_HZ, self._on_timer)
 
+        # Periodic publish timer
+        self.pub_mode = self.create_publisher(String, self._mode_topic, 10)
+        self._mode_timer = self.create_timer(self._mode_pub_period_s, self._publish_mode)
+        self._publish_mode()
+
+        # Start disarmed by default
         self._set_arm(False)
+
+
+        # Startup log
 
         self.get_logger().info(
             "Started. "
@@ -165,6 +244,12 @@ class Ll_controller(Node):
             f"TwistXY={self.TWIST_VEL_XY} m/s TwistZ={self.TWIST_VEL_Z} m/s "
             f"YawRate={self.TWIST_YAW_RATE} rad/s PitchRate={self.TWIST_PITCH_RATE} rad/s"
         )
+
+
+    def _publish_mode(self) -> None:
+        msg = String()
+        msg.data = self._mode.value
+        self.pub_mode.publish(msg)
 
     def _set_arm(self, flag) -> None:
         # se non e' armato e la flag e' true, allora arma
@@ -187,15 +272,21 @@ class Ll_controller(Node):
             return
 
         self._mode = mode
+        self._reset_ema()
 
         if self._mode in (ControlMode.GAMEPAD, ControlMode.GAMEPAD_TWIST):
             self._send_neutral_all()
 
+        self._publish_mode()
         self.get_logger().info(f"Switched mode -> {self._mode.value}")
+    
+    def _set_enable_ema(self, flag: bool) -> None:
+        self.EMA_ENABLE = flag
+        self.get_logger().info(f"EMA filtering: {self.EMA_ENABLE}")
 
     def _set_enable_pitch(self, flag: bool) -> None:
         self.enable_pitch = flag
-        self.get_logger().info(f"Pitch control enabled: {self.enable_pitch}")
+        self.get_logger().info(f"Pitch control: {self.enable_pitch}")
     
     def _set_linear_vel(self, val:int) -> None:
         delta = 0.1
@@ -260,6 +351,9 @@ class Ll_controller(Node):
 
         if rising_edge(self._btn_setting):
             self._set_enable_pitch(not self.enable_pitch)
+
+        if rising_edge(self._btn_option):
+            self._set_enable_ema(not self.EMA_ENABLE)
         
         prev_dx, prev_dy = self._prev_joy_dpad
         dx, dy = dpad  # dx: left/right, dy: up/down
@@ -331,6 +425,9 @@ class Ll_controller(Node):
                 self.get_logger().warn(f"distance {distance:.2f} m below minimum {self.min_distance:.2f} m! Switching to SAFETY mode.")
                 self._send_backward()
 
+    def _reset_ema(self) -> None:
+        for i in range(8):
+            self._ema_us[i] = self.NEUTRAL_US
 
     def _send_backward(
         self,
@@ -374,13 +471,26 @@ class Ll_controller(Node):
 
         for i in range(8):
             age_s = (now - self.last_time[i]).nanoseconds * 1e-9
-            if age_s > self.TOPIC_TIMEOUT_S:
-                raw = self.NEUTRAL_RAW
-                us = self.NEUTRAL_US
-            else:
-                us = clamp_float(self.last_out[i], self.MIN_US, self.MAX_US)
-                raw = us_to_value(us, self.PWM_FREQ_HZ)
 
+            # Target command (in us)
+            if age_s > self.TOPIC_TIMEOUT_S:
+                target_us = self.NEUTRAL_US
+            else:
+                target_us = clamp_float(self.last_out[i], self.MIN_US, self.MAX_US)
+
+            # EMA filtering (in us)
+            #get timestamp before and after to check difference
+
+            if self.EMA_ENABLE:
+                prev = self._ema_us[i]
+                filt = (1.0 - self.EMA_ALPHA) * prev + self.EMA_ALPHA * target_us
+                self._ema_us[i] = filt
+                send_us = filt
+            else:
+                send_us = target_us
+            # Convert to raw PWM value
+            send_us = clamp_float(send_us, self.MIN_US, self.MAX_US)
+            raw = us_to_value(send_us, self.PWM_FREQ_HZ)
             values_raw.append(raw)
 
         # Command to thrusters
@@ -390,6 +500,34 @@ class Ll_controller(Node):
         msg = Float64MultiArray()
         msg.data = values_raw
         self.pub_pwm_us.publish(msg)
+
+    def _on_battery_timer(self) -> None:
+        try:
+            # Read ADC voltage (0..3.3V)
+            v_adc = float(navigator.read_adc(self._adc_voltage))
+
+            # Convert to battery voltage
+            v_bat = v_adc * self._v_div
+
+            # Publish voltage
+            v_msg = Float64()
+            v_msg.data = v_bat
+            self._pub_voltage.publish(v_msg)
+
+            # Determine status
+            if v_bat <= self._critical_v:
+                status = "CRITICAL"
+            elif v_bat <= self._warn_v:
+                status = "WARNING"
+            else:
+                status = "OK"
+
+            s_msg = String()
+            s_msg.data = status
+            self._pub_status.publish(s_msg)
+
+        except Exception as e:
+            self.get_logger().error(f"Battery read failed: {e}")
 
     def deinit(self) -> None:
         try:
