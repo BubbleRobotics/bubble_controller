@@ -137,21 +137,56 @@ class Ll_controller(Node):
 
         # Parameters: joystick mapping
 
-        self.declare_parameter("joy_button_a", 0)
-        self.declare_parameter("joy_button_b", 1)
-        self.declare_parameter("joy_button_x", 3)
-        self.declare_parameter("joy_button_power", 8)
-        self.declare_parameter("joy_button_setting", 7)
-        self.declare_parameter("joy_button_option", 6)
+        self.declare_parameter("use_bluetooth", False)
+        self.use_bluetooth = bool(self.get_parameter("use_bluetooth").value)
+        if self.use_bluetooth:
+            self.declare_parameter("joy_button_a", config.get("bluetooth_joy_button_a", 0))
+            self.declare_parameter("joy_button_b", config.get("bluetooth_joy_button_b", 1))
+            self.declare_parameter("joy_button_y", config.get("bluetooth_joy_button_y", 4))
+            self.declare_parameter("joy_button_power", config.get("bluetooth_joy_button_power", 12))
+            self.declare_parameter("joy_button_setting", config.get("bluetooth_joy_button_setting", 11))
+            self.declare_parameter("joy_button_option", config.get("bluetooth_joy_button_option", 10))
+
+            self.declare_parameter("joy_left_stick_up_down", config.get("bluetooth_joy_left_stick_up_down", 1))
+            self.declare_parameter("joy_left_stick_left_right", config.get("bluetooth_joy_left_stick_left_right", 0))
+            self.declare_parameter("joy_right_stick_up_down", config.get("bluetooth_joy_right_stick_up_down", 3))
+            self.declare_parameter("joy_right_stick_left_right", config.get("bluetooth_joy_right_stick_left_right", 2))
+
+            self.declare_parameter("joy_left_trigger", config.get("bluetooth_joy_left_trigger", 5))
+            self.declare_parameter("joy_right_trigger", config.get("bluetooth_joy_right_trigger", 4))
+        else:
+            self.declare_parameter("joy_button_a", config.get("usb_joy_button_a", 0))
+            self.declare_parameter("joy_button_b", config.get("usb_joy_button_b", 1))
+            self.declare_parameter("joy_button_y", config.get("usb_joy_button_y", 3))
+            self.declare_parameter("joy_button_power", config.get("usb_joy_button_power", 8))
+            self.declare_parameter("joy_button_setting", config.get("usb_joy_button_setting", 7))
+            self.declare_parameter("joy_button_option", config.get("usb_joy_button_option", 6))
+
+            self.declare_parameter("joy_left_stick_up_down", config.get("usb_joy_left_stick_up_down", 1))
+            self.declare_parameter("joy_left_stick_left_right", config.get("usb_joy_left_stick_left_right", 0))
+            self.declare_parameter("joy_right_stick_up_down", config.get("usb_joy_right_stick_up_down", 4))
+            self.declare_parameter("joy_right_stick_left_right", config.get("usb_joy_right_stick_left_right", 3))
+
+            self.declare_parameter("joy_left_trigger", config.get("usb_joy_left_trigger", 2))
+            self.declare_parameter("joy_right_trigger", config.get("usb_joy_right_trigger", 5))
+    
         self.declare_parameter("joy_dpad_up_down", 1)
 
         self._btn_a = int(self.get_parameter("joy_button_a").value)
         self._btn_b = int(self.get_parameter("joy_button_b").value)
-        self._btn_x = int(self.get_parameter("joy_button_x").value)
+        self._btn_y = int(self.get_parameter("joy_button_y").value)
         self._btn_power = int(self.get_parameter("joy_button_power").value)
         self._btn_setting = int(self.get_parameter("joy_button_setting").value)
         self._btn_option = int(self.get_parameter("joy_button_option").value)
+
         self._dpad_up_down = int(self.get_parameter("joy_dpad_up_down").value)
+        
+        self._left_stick_ud = int(self.get_parameter("joy_left_stick_up_down").value)
+        self._left_stick_lr = int(self.get_parameter("joy_left_stick_left_right").value)
+        self._right_stick_ud = int(self.get_parameter("joy_right_stick_up_down").value)
+        self._right_stick_lr = int(self.get_parameter("joy_right_stick_left_right").value)
+        self._left_trigger = int(self.get_parameter("joy_left_trigger").value)
+        self._right_trigger = int(self.get_parameter("joy_right_trigger").value)
 
         # Initial control mode
         self._mode: ControlMode = ControlMode.GAMEPAD
@@ -240,7 +275,7 @@ class Ll_controller(Node):
         self.get_logger().info(
             "Started. "
             f"mode={self._mode.value} PWM_FREQ_HZ={self.PWM_FREQ_HZ}, update={self.UPDATE_RATE_HZ}Hz, "
-            f"joy A={self._btn_a}, B={self._btn_b}, X={self._btn_x}, Span={self.GAMEPAD_SPAN}, "
+            f"joy A={self._btn_a}, B={self._btn_b}, Y={self._btn_y}, Span={self.GAMEPAD_SPAN}, "
             f"TwistXY={self.TWIST_VEL_XY} m/s TwistZ={self.TWIST_VEL_Z} m/s "
             f"YawRate={self.TWIST_YAW_RATE} rad/s PitchRate={self.TWIST_PITCH_RATE} rad/s"
         )
@@ -322,7 +357,7 @@ class Ll_controller(Node):
         # mode switching on A/B
         buttons = list(msg.buttons) if msg.buttons is not None else []
         axes = list(msg.axes) if msg.axes is not None else []
-        axes_4 = axes[4] if self.enable_pitch else 0.0
+        joy_right_stick_up_down = axes[self._right_stick_ud] if self.enable_pitch else 0.0
         dpad = (axes[6], axes[7])
 
         if self._prev_joy_buttons is None:
@@ -343,7 +378,7 @@ class Ll_controller(Node):
         if rising_edge(self._btn_b):
             self._set_mode(ControlMode.AUV_CONTROLLER)
 
-        if rising_edge(self._btn_x):
+        if rising_edge(self._btn_y):
             self._set_mode(ControlMode.GAMEPAD_TWIST)
             
         if rising_edge(self._btn_power):
@@ -375,9 +410,9 @@ class Ll_controller(Node):
         self._prev_joy_dpad = dpad
 
         if self._mode == ControlMode.GAMEPAD:
-            t1 = axes_to_pwm_raw(axes[0], axes[1], axes[3], span = self.GAMEPAD_SPAN) # XY yaw
+            t1 = axes_to_pwm_raw(axes[self._left_stick_lr], axes[self._left_stick_ud], axes[self._right_stick_lr], span = self.GAMEPAD_SPAN) # XY yaw
 
-            t2 = vertical_mix_pwm_us(axes[5], axes[2], axes_4, span = self.GAMEPAD_SPAN) # vertical thrusters
+            t2 = vertical_mix_pwm_us(axes[self._right_trigger], axes[self._left_trigger], joy_right_stick_up_down, span = self.GAMEPAD_SPAN) # vertical thrusters
 
             t = t1 + t2
 
@@ -391,18 +426,18 @@ class Ll_controller(Node):
         elif self._mode == ControlMode.GAMEPAD_TWIST:
             if len(axes) < 6:
                 return
-            x_cmd = clamp(-axes[0], -1.0, 1.0)  # right (+)
-            y_cmd = clamp( axes[1], -1.0, 1.0)  # forward (+)
-            yaw_cmd = clamp(-axes[3], -1.0, 1.0)  # yaw right (+)
+            x_cmd = clamp(-axes[self._left_stick_lr], -1.0, 1.0)  # right (+)
+            y_cmd = clamp( axes[self._left_stick_ud], -1.0, 1.0)  # forward (+)
+            yaw_cmd = clamp(-axes[self._right_stick_lr], -1.0, 1.0)  # yaw right (+)
 
             x_cmd, y_cmd = normalize_xy(x_cmd, y_cmd)
 
-            t_up = trigger_to_01(axes[5])   
-            t_down = trigger_to_01(axes[2])
+            t_up = trigger_to_01(axes[self._right_trigger])   
+            t_down = trigger_to_01(axes[self._left_trigger])
             u_z_up = clamp(t_up - t_down, -1.0, 1.0)
 
             # Pitch command
-            u_pitch = clamp(axes_4, -1.0, 1.0)
+            u_pitch = clamp(joy_right_stick_up_down, -1.0, 1.0)
 
             tw = Twist()
             tw.linear.x = float(y_cmd * self.TWIST_VEL_XY)     # forward
