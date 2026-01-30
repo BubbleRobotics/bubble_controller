@@ -72,10 +72,8 @@ def desaturate(us: List[float]) -> List[float]:
     return [u / m for u in us]
 
 def vertical_mix_pwm_us(axis_down: float, axis_up: float, axis_pitch: float, freq_hz: float = 50.0, span: float = 400.0) -> List[float]:
-    t_up = trigger_to_01(axis_down)
-    t_down = trigger_to_01(axis_up)
-
-    print(t_up, t_down)
+    t_up = trigger_to_01(axis_up)
+    t_down = trigger_to_01(axis_down)
 
     # Heave command in [-1, 1]
     u_z = clamp(t_up - t_down, -1.0, 1.0)
