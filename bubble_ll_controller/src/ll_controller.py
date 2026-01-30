@@ -98,7 +98,7 @@ class Ll_controller(Node):
 
         # Config: distance safety
 
-        self.distance_topic = str(config.get("distance_topic", "/distance"))
+        self.distance_topic = str(config.get("distance_topic", "/stereo/min_distance"))
         self.min_distance = float(config.get("min_distance_before_safety", 0.5))
 
 
@@ -452,8 +452,6 @@ class Ll_controller(Node):
 
     def _cb_distance(self, msg: Float32) -> None:
         distance = msg.data
-        self.get_logger().debug(f"Distance received: {distance:.2f} m")
-        self.get_logger().debug(f"Minimum distance threshold: {self.min_distance:.2f} m")
         if distance < self.min_distance:
             if self._mode != ControlMode.SAFETY:
                 self._set_mode(ControlMode.SAFETY)
