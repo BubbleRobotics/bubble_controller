@@ -4,7 +4,7 @@
 
   <link name="base_footprint" />
 
-  <link name="base_link">
+  <link name="base_link_auv">
     <origin xyz="0 0 0"
             rpy="0 0 0" />
   </link>
@@ -55,7 +55,7 @@
     <origin rpy="0 0 0"
             xyz="0 0 0" />
     <parent link="base_footprint" />
-    <child link="base_link" />
+    <child link="base_link_auv" />
   </joint>
 
   <!-- Thruster joints -->
@@ -64,7 +64,7 @@
          ccw="true">
     <origin rpy="-1.571 1.571 -0.785"
             xyz="0.14 -0.092 0.0" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_1" />
     <axis xyz="0 0 -1" />
   </joint>
@@ -74,7 +74,7 @@
          ccw="true">
     <origin rpy="-1.571 1.571 -2.356"
             xyz="0.14 0.092 0.0" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_2" />
     <axis xyz="0 0 -1" />
   </joint>
@@ -84,7 +84,7 @@
          ccw="false">
     <origin rpy="-1.571 1.571 0.785"
             xyz="-0.15 -0.092 0.0" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_3" />
     <axis xyz="0 0 -1" />
   </joint>
@@ -94,7 +94,7 @@
          ccw="false">
     <origin rpy="-1.571 1.571 2.356"
             xyz="-0.15 0.092 0.0" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_4" />
     <axis xyz="0 0 -1" />
   </joint>
@@ -104,7 +104,7 @@
          ccw="true">
     <origin rpy="0 0 0"
             xyz="0.118 -0.215 0.064" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_5" />
     <axis xyz="0 0 -1" />
   </joint>
@@ -114,7 +114,7 @@
          ccw="false">
     <origin rpy="0 0 0"
             xyz="0.118 0.215 0.064" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_6" />
     <axis xyz="0 0 -1" />
   </joint>
@@ -124,7 +124,7 @@
          ccw="false">
     <origin rpy="0 0 0"
             xyz="-0.118 -0.215 0.064" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_7" />
     <axis xyz="0 0 -1" />
   </joint>
@@ -134,7 +134,7 @@
          ccw="true">
     <origin rpy="0 0 0"
             xyz="-0.118 0.215 0.064" />
-    <parent link="base_link" />
+    <parent link="base_link_auv" />
     <child link="thruster_8" />
     <axis xyz="0 0 -1" />
   </joint>
