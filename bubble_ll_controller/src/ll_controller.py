@@ -121,6 +121,8 @@ class Ll_controller(Node):
         # State / channels / topics
 
         self.isArmed = False
+        self.lightMode = 0
+        
         self.channels = [0, 1, 2, 3, 4, 5, 6, 7]
 
         self.topics: List[str] = [
@@ -142,6 +144,7 @@ class Ll_controller(Node):
         if self.use_bluetooth:
             self.declare_parameter("joy_button_a", config.get("bluetooth_joy_button_a", 0))
             self.declare_parameter("joy_button_b", config.get("bluetooth_joy_button_b", 1))
+            self.declare_parameter("joy_button_x", config.get("bluetooth_joy_button_x", 3))
             self.declare_parameter("joy_button_y", config.get("bluetooth_joy_button_y", 4))
             self.declare_parameter("joy_button_power", config.get("bluetooth_joy_button_power", 12))
             self.declare_parameter("joy_button_setting", config.get("bluetooth_joy_button_setting", 11))
@@ -157,6 +160,7 @@ class Ll_controller(Node):
         else:
             self.declare_parameter("joy_button_a", config.get("usb_joy_button_a", 0))
             self.declare_parameter("joy_button_b", config.get("usb_joy_button_b", 1))
+            self.declare_parameter("joy_button_x", config.get("usb_joy_button_x", 2))
             self.declare_parameter("joy_button_y", config.get("usb_joy_button_y", 3))
             self.declare_parameter("joy_button_power", config.get("usb_joy_button_power", 8))
             self.declare_parameter("joy_button_setting", config.get("usb_joy_button_setting", 7))
@@ -174,6 +178,7 @@ class Ll_controller(Node):
 
         self._btn_a = int(self.get_parameter("joy_button_a").value)
         self._btn_b = int(self.get_parameter("joy_button_b").value)
+        self._btn_x = int(self.get_parameter("joy_button_x").value)
         self._btn_y = int(self.get_parameter("joy_button_y").value)
         self._btn_power = int(self.get_parameter("joy_button_power").value)
         self._btn_setting = int(self.get_parameter("joy_button_setting").value)
@@ -274,8 +279,7 @@ class Ll_controller(Node):
 
         self.get_logger().info(
             "Started. "
-            f"mode={self._mode.value} PWM_FREQ_HZ={self.PWM_FREQ_HZ}, update={self.UPDATE_RATE_HZ}Hz, "
-            f"joy A={self._btn_a}, B={self._btn_b}, Y={self._btn_y}, Span={self.GAMEPAD_SPAN}, "
+            f"mode={self._mode.value}, Span={self.GAMEPAD_SPAN}, "
             f"TwistXY={self.TWIST_VEL_XY} m/s TwistZ={self.TWIST_VEL_Z} m/s "
             f"YawRate={self.TWIST_YAW_RATE} rad/s PitchRate={self.TWIST_PITCH_RATE} rad/s"
         )
@@ -301,6 +305,11 @@ class Ll_controller(Node):
             self.isArmed = False
             self.get_logger().info("Disarmed thrusters")
             time.sleep(2.0)
+
+    def _set_lights(self, us) -> None:
+        navigator.set_pwm_channel_value(12, us_to_value(us, self.PWM_FREQ_HZ))
+        self.isLightsOn = True
+        self.get_logger().info(f"Lights set to {us} us")
 
     def _set_mode(self, mode: ControlMode) -> None:
         if mode == self._mode:
@@ -377,6 +386,15 @@ class Ll_controller(Node):
 
         if rising_edge(self._btn_b):
             self._set_mode(ControlMode.AUV_CONTROLLER)
+        
+        if rising_edge(self._btn_x):
+            self.lightMode = (self.lightMode + 1) % 3
+            if self.lightMode == 0:
+                self._set_lights(1500.0)
+            elif self.lightMode == 1:
+                self._set_lights(1700.0)
+            else:
+                self._set_lights(1900.0)
 
         if rising_edge(self._btn_y):
             self._set_mode(ControlMode.GAMEPAD_TWIST)
